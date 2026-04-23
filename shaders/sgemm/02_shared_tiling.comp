@@ -1,0 +1,68 @@
+#version 450
+
+// Planned stage: shared-memory tiling.
+// Intentionally not wired into the build yet.
+
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+  uint M;
+  uint N;
+  uint K;
+  float alpha;
+  float beta;
+}
+pc;
+
+layout(set = 0, binding = 0, std430) readonly buffer MatrixA {
+  float a[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer MatrixB {
+  float b[];
+};
+
+layout(set = 0, binding = 2, std430) buffer MatrixC {
+  float c[];
+};
+
+shared float As[32 * 32];
+shared float Bs[32 * 32];
+
+void main() {
+  // Vulkan Version
+  const uint BLOCKSIZE = 32;
+
+  const uint cRow = gl_WorkGroupID.x;
+  const uint cCol = gl_WorkGroupID.y;
+
+  const uint threadCol = gl_LocalInvocationID.x % BLOCKSIZE;
+  const uint threadRow = gl_LocalInvocationID.x / BLOCKSIZE;
+
+  const uint row = cRow * BLOCKSIZE + threadRow;
+  const uint col = cCol * BLOCKSIZE + threadCol;
+  const uint c_index = row * pc.N + col;
+
+
+  float acc = 0.0;
+  for (uint wkgroupIdx = 0; wkgroupIdx < pc.K; wkgroupIdx += BLOCKSIZE) {
+
+    As[threadRow * BLOCKSIZE + threadCol] = a[row * pc.K + threadCol + wkgroupIdx];
+    Bs[threadRow * BLOCKSIZE + threadCol] = b[(threadRow + wkgroupIdx) * pc.N + col];
+
+    barrier();
+
+    // execute the dotproduct on the currently cached block
+    for (int dotIdx = 0; dotIdx < BLOCKSIZE; ++dotIdx) {
+      acc += As[threadRow * BLOCKSIZE + dotIdx] * Bs[dotIdx * BLOCKSIZE + threadCol];
+    }
+
+    // need to sync again at the end, to avoid faster threads
+    // fetching the next block into the cache before slower threads are done
+    barrier();
+
+  }
+
+  // C = α*(A@B)+β*C
+  c[c_index] = pc.alpha * acc + pc.beta * c[c_index];
+}

@@ -1,0 +1,110 @@
+#version 450
+
+// Shared-memory bank-conflict mitigation with padded B tile stride.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+  uint M;
+  uint N;
+  uint K;
+  float alpha;
+  float beta;
+}
+pc;
+
+layout(set = 0, binding = 0, std430) readonly buffer MatrixA {
+  vec4 a[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer MatrixB {
+  vec4 b[];
+};
+
+layout(set = 0, binding = 2, std430) buffer MatrixC {
+  vec4 c[];
+};
+
+shared float As[128 * 8];
+shared float Bs[8 * (128 + 5)];
+
+void main() {
+  const uint BM = 128;
+  const uint BN = 128;
+  const uint BK = 8;
+  const uint TM = 8;
+  const uint TN = 8;
+  const uint extraCols = 5;
+
+  const uint cRow = gl_WorkGroupID.y;
+  const uint cCol = gl_WorkGroupID.x;
+
+  const uint threadCol = gl_LocalInvocationID.x % (BN / TN);
+  const uint threadRow = gl_LocalInvocationID.x / (BN / TN);
+
+  const uint a_base = cRow * BM * pc.K;
+  const uint b_base = cCol * BN;
+  const uint c_base = cRow * BM * pc.N + cCol * BN;
+
+  const uint innerRowA = gl_LocalInvocationID.x / (BK / 4);
+  const uint innerColA = gl_LocalInvocationID.x % (BK / 4);
+  const uint innerRowB = gl_LocalInvocationID.x / (BN / 4);
+  const uint innerColB = gl_LocalInvocationID.x % (BN / 4);
+
+  float threadResults[TM * TN];
+  for (uint i = 0; i < TM * TN; ++i) {
+    threadResults[i] = 0.0;
+  }
+
+  float regM[TM] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  float regN[TN] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+  for (uint wkgroupIdx = 0; wkgroupIdx < pc.K; wkgroupIdx += BK) {
+    const uint aFloatIndex = a_base + innerRowA * pc.K + wkgroupIdx + innerColA * 4;
+    const vec4 aVec = a[aFloatIndex >> 2];
+
+    As[(innerColA * 4 + 0) * BM + innerRowA] = aVec.x;
+    As[(innerColA * 4 + 1) * BM + innerRowA] = aVec.y;
+    As[(innerColA * 4 + 2) * BM + innerRowA] = aVec.z;
+    As[(innerColA * 4 + 3) * BM + innerRowA] = aVec.w;
+
+    const uint bFloatIndex = b_base + (wkgroupIdx + innerRowB) * pc.N + innerColB * 4;
+    const vec4 bVec = b[bFloatIndex >> 2];
+
+    Bs[innerRowB * (BN + extraCols) + innerColB * 4 + 0] = bVec.x;
+    Bs[innerRowB * (BN + extraCols) + innerColB * 4 + 1] = bVec.y;
+    Bs[innerRowB * (BN + extraCols) + innerColB * 4 + 2] = bVec.z;
+    Bs[innerRowB * (BN + extraCols) + innerColB * 4 + 3] = bVec.w;
+
+    barrier();
+
+    for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
+      for (uint i = 0; i < TM; ++i) {
+        regM[i] = As[dotIdx * BM + threadRow * TM + i];
+      }
+      for (uint i = 0; i < TN; ++i) {
+        regN[i] = Bs[dotIdx * (BN + extraCols) + threadCol * TN + i];
+      }
+      for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
+        for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
+          threadResults[resIdxM * TN + resIdxN] += regM[resIdxM] * regN[resIdxN];
+        }
+      }
+    }
+
+    barrier();
+  }
+
+  for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
+    for (uint resIdxN = 0; resIdxN < TN; resIdxN += 4) {
+      const uint cFloatIndex = c_base + (threadRow * TM + resIdxM) * pc.N + threadCol * TN + resIdxN;
+      vec4 cVec = c[cFloatIndex >> 2];
+      cVec.x = pc.alpha * threadResults[resIdxM * TN + resIdxN + 0] + pc.beta * cVec.x;
+      cVec.y = pc.alpha * threadResults[resIdxM * TN + resIdxN + 1] + pc.beta * cVec.y;
+      cVec.z = pc.alpha * threadResults[resIdxM * TN + resIdxN + 2] + pc.beta * cVec.z;
+      cVec.w = pc.alpha * threadResults[resIdxM * TN + resIdxN + 3] + pc.beta * cVec.w;
+
+      c[cFloatIndex >> 2] = cVec;
+    }
+  }
+}

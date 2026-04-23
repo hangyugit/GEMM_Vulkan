@@ -1,0 +1,370 @@
+#version 450
+
+// base code is double buffering kernel
+// grouped M swizzling
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+  uint M;
+  uint N;
+  uint K;
+  float alpha;
+  float beta;
+}
+pc;
+
+layout(set = 0, binding = 0, std430) readonly buffer MatrixA {
+  vec4 a[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer MatrixB {
+  vec4 b[];
+};
+
+layout(set = 0, binding = 2, std430) buffer MatrixC {
+  vec4 c[];
+};
+
+shared float As[2 * 128 * 16];
+shared float Bs[2 * 16 * 256];
+
+void main() {
+  const uint BM = 128;
+  const uint BN = 256;
+  const uint BK = 16;
+
+  const uint WM = 128;
+  const uint WN = 32;
+  const uint WNITER = 1;
+
+  const uint TM = 8;
+  const uint TN = 8;
+  
+  const uint SUBGROUPSIZE = 32;
+  const uint NUM_THREADS = 256;
+
+  // grouped M swizzle
+  const uint GM = (pc.M + BM - 1) / BM;
+  const uint GN = (pc.N + BN - 1) / BN;
+
+  const uint swizzleM = 8;
+
+  const uint linear_tile = gl_WorkGroupID.y * GN + gl_WorkGroupID.x;
+  const uint group_tile_count = swizzleM * GN;
+  const uint group_id = linear_tile / group_tile_count;
+  const uint intra_group = linear_tile - group_id * group_tile_count;
+
+  const uint group_start_m = group_id * swizzleM;
+  const uint group_m = min(swizzleM, GM - group_start_m);
+
+  const uint cRow = group_start_m + (intra_group % GM);
+  const uint cCol = intra_group / GM;
+
+  // Placement of the subgroup in the threadblock tile
+  const uint subgroupIdx = gl_LocalInvocationID.x / SUBGROUPSIZE; // the warp this thread is in
+  const uint subgroupCol = subgroupIdx % (BN / WN);
+  const uint subgroupRow = subgroupIdx / (BN / WN);
+
+  // size of the subgroup subtile
+  const uint WMITER = (WM * WN) / (SUBGROUPSIZE * TM * TN * WNITER);
+  const uint WSUBM = WM / WMITER; 
+  const uint WSUBN = WN / WNITER; 
+
+  // Placement of the thread in the subgroup subtile
+  const uint threadIdxInSubgroup = gl_LocalInvocationID.x % SUBGROUPSIZE;        
+  const uint threadColInSubgroup = threadIdxInSubgroup % (WSUBN / TN); 
+  const uint threadRowInSubgroup = threadIdxInSubgroup / (WSUBN / TN); 
+
+  // setup double buffering split
+  bool doubleBufferIdx = gl_LocalInvocationID.x >= (NUM_THREADS / 2);
+
+  const uint a_base = cRow * BM * pc.K;
+  const uint b_base = cCol * BN;
+  const uint c_base = (cRow * BM + subgroupRow * WM) * pc.N + cCol * BN + subgroupCol * WN;
+
+  // calculating the indices that this thread will load into SMEM
+  // we'll load 128bit / 32bit = 4 elements per thread at each step
+  const uint innerRowA = (gl_LocalInvocationID.x % (NUM_THREADS / 2)) / (BK / 4);
+  const uint innerColA = (gl_LocalInvocationID.x % (NUM_THREADS / 2)) % (BK / 4);
+  const uint rowStrideA = ((NUM_THREADS / 2) * 4) / BK;
+
+  const uint innerRowB = (gl_LocalInvocationID.x % (NUM_THREADS / 2)) / (BN / 4);
+  const uint innerColB = (gl_LocalInvocationID.x % (NUM_THREADS / 2)) % (BN / 4);
+  const uint rowStrideB = (NUM_THREADS / 2) / (BN / 4);
+
+  // allocate thread-local cache for results in registerfile
+  float threadResults[WMITER * TM * WNITER * TN];
+
+  for (int i = 0; i < WMITER * TM * WNITER * TN; ++i)
+  {
+    threadResults[i] = 0.0;
+  }
+
+  // we cache into registers on the warptile level
+  float regM[WMITER * TM];
+  float regN[WNITER * TN];
+
+  for (int i = 0; i < WMITER * TM; ++i)
+  {
+    regM[i] = 0.0;
+  }
+
+  for (int i = 0; i < WNITER * TN; ++i)
+  {
+    regN[i] = 0.0;
+  }
+
+  if (!doubleBufferIdx) {
+    // load first (B0)
+    for (uint offset = 0; offset + rowStrideA <= BM; offset += rowStrideA) {
+      const uint row = innerRowA + offset;
+      const uint aFloatIndex = a_base + row * pc.K + innerColA * 4;
+
+      const vec4 aVec = a[aFloatIndex >> 2];
+
+      As[(innerColA * 4 + 0) * BM + row] = aVec.x;
+      As[(innerColA * 4 + 1) * BM + row] = aVec.y;
+      As[(innerColA * 4 + 2) * BM + row] = aVec.z;
+      As[(innerColA * 4 + 3) * BM + row] = aVec.w;
+    }
+
+    // B tile load: global B -> shared Bs buffer 0
+    for (uint offset = 0u; offset + rowStrideB <= BK; offset += rowStrideB) {
+      const uint row = innerRowB + offset;
+      const uint bFloatIndex = row * pc.N + b_base + innerColB * 4;
+      const vec4 bVec = b[bFloatIndex >> 2];
+
+      Bs[row * BN + innerColB * 4 + 0] = bVec.x;
+      Bs[row * BN + innerColB * 4 + 1] = bVec.y;
+      Bs[row * BN + innerColB * 4 + 2] = bVec.z;
+      Bs[row * BN + innerColB * 4 + 3] = bVec.w;
+    }
+  }
+
+  barrier();
+
+  // outer-most loop over block tiles
+  for (uint wkgroupIdx = 0; wkgroupIdx < pc.K; wkgroupIdx += 2 * BK) {
+    if (!doubleBufferIdx) {
+      // process current (B0)
+      for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
+        for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+          for (uint i = 0; i < TM; ++i) {
+            regM[wSubRowIdx * TM + i] = 
+              As[dotIdx * BM + subgroupRow * WM + wSubRowIdx * WSUBM + threadRowInSubgroup * TM + i];
+          }
+        }      
+
+        for (uint wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
+          for (uint i = 0; i < TN; ++i) {
+            regN[wSubColIdx * TN + i] = 
+              Bs[dotIdx * BN + subgroupCol * WN + wSubColIdx * WSUBN + threadColInSubgroup * TN + i];
+          }
+        }
+
+        for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+          for (uint wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
+            for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
+              for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
+                threadResults[(wSubRowIdx * TM + resIdxM) * (WNITER * TN) + (wSubColIdx * TN) + resIdxN] += 
+                  regM[wSubRowIdx * TM + resIdxM] * regN[wSubColIdx * TN + resIdxN];
+              }
+            }
+          }
+        }
+      }
+      barrier();
+
+      // process current+1 (B1)
+      const uint As_offset = BM * BK;
+      const uint Bs_offset = BK * BN;
+
+      if (wkgroupIdx + BK < pc.K){
+        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
+          for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+            for (uint i = 0; i < TM; ++i) {
+              regM[wSubRowIdx * TM + i] = 
+                As[As_offset + dotIdx * BM + subgroupRow * WM + wSubRowIdx * WSUBM + threadRowInSubgroup * TM + i];
+            }
+          }
+        
+
+          for (uint wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
+            for (uint i = 0; i < TN; ++i) {
+              regN[wSubColIdx * TN + i] = 
+                Bs[Bs_offset + dotIdx * BN + subgroupCol * WN + wSubColIdx * WSUBN + threadColInSubgroup * TN + i];
+            }
+          }
+
+          for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+            for (uint wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
+              for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
+                for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
+                  threadResults[(wSubRowIdx * TM + resIdxM) * (WNITER * TN) + (wSubColIdx * TN) + resIdxN] += 
+                    regM[wSubRowIdx * TM + resIdxM] * regN[wSubColIdx * TN + resIdxN];
+                }
+              }
+            }
+          }
+        }
+      }
+      barrier();
+
+      // load current + 2 (B0)
+      const uint A_offset = 2 * BK;
+      const uint B_offset = 2 * BK * pc.N;
+
+      if (wkgroupIdx + 2 * BK < pc.K){
+        for (uint offset = 0; offset + rowStrideA <= BM; offset += rowStrideA) {
+          const uint row = innerRowA + offset;
+          const uint aFloatIndex = a_base + row * pc.K + innerColA * 4 + wkgroupIdx + A_offset;
+
+          const vec4 aVec = a[aFloatIndex >> 2];
+
+          As[(innerColA * 4 + 0) * BM + row] = aVec.x;
+          As[(innerColA * 4 + 1) * BM + row] = aVec.y;
+          As[(innerColA * 4 + 2) * BM + row] = aVec.z;
+          As[(innerColA * 4 + 3) * BM + row] = aVec.w;
+        }
+
+        // B tile load: global B -> shared Bs buffer 0
+        for (uint offset = 0u; offset + rowStrideB <= BK; offset += rowStrideB) {
+          const uint row = innerRowB + offset;
+          const uint bFloatIndex = (row + wkgroupIdx) * pc.N + b_base + innerColB * 4 + B_offset;
+
+          const vec4 bVec = b[bFloatIndex >> 2];
+
+          Bs[row * BN + innerColB * 4 + 0] = bVec.x;
+          Bs[row * BN + innerColB * 4 + 1] = bVec.y;
+          Bs[row * BN + innerColB * 4 + 2] = bVec.z;
+          Bs[row * BN + innerColB * 4 + 3] = bVec.w;
+        }
+      }
+      
+    }else {
+    // load current + 1 (B1)
+      const uint A_offset = BK;
+      const uint B_offset = BK * pc.N;
+
+      const uint As_offset = BM * BK;
+      const uint Bs_offset = BK * BN;
+
+      if (wkgroupIdx + BK < pc.K){
+        for (uint offset = 0; offset + rowStrideA <= BM; offset += rowStrideA) {
+          const uint row = innerRowA + offset;
+          const uint aFloatIndex = a_base + row * pc.K + innerColA * 4 + wkgroupIdx + A_offset;
+
+          const vec4 aVec = a[aFloatIndex >> 2];
+
+          As[As_offset + (innerColA * 4 + 0) * BM + row] = aVec.x;
+          As[As_offset + (innerColA * 4 + 1) * BM + row] = aVec.y;
+          As[As_offset + (innerColA * 4 + 2) * BM + row] = aVec.z;
+          As[As_offset + (innerColA * 4 + 3) * BM + row] = aVec.w;
+        }
+
+        // B tile load: global B -> shared Bs buffer 0
+        for (uint offset = 0u; offset + rowStrideB <= BK; offset += rowStrideB) {
+          const uint row = innerRowB + offset;
+          const uint bFloatIndex = (row + wkgroupIdx) * pc.N + b_base + innerColB * 4 + B_offset;
+          const vec4 bVec = b[bFloatIndex >> 2];
+
+          Bs[Bs_offset + row * BN + innerColB * 4 + 0] = bVec.x;
+          Bs[Bs_offset + row * BN + innerColB * 4 + 1] = bVec.y;
+          Bs[Bs_offset + row * BN + innerColB * 4 + 2] = bVec.z;
+          Bs[Bs_offset + row * BN + innerColB * 4 + 3] = bVec.w;
+        }
+
+      }
+      barrier();
+
+      // process current (B0)
+      for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
+        for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+          for (uint i = 0; i < TM; ++i) {
+            regM[wSubRowIdx * TM + i] = 
+              As[dotIdx * BM + subgroupRow * WM + wSubRowIdx * WSUBM + threadRowInSubgroup * TM + i];
+          }
+        }
+
+        for (uint wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
+          for (uint i = 0; i < TN; ++i) {
+            regN[wSubColIdx * TN + i] = 
+              Bs[dotIdx * BN + subgroupCol * WN + wSubColIdx * WSUBN + threadColInSubgroup * TN + i];
+          }
+        }
+
+        for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+          for (uint wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
+            for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
+              for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
+                threadResults[(wSubRowIdx * TM + resIdxM) * (WNITER * TN) + (wSubColIdx * TN) + resIdxN] += 
+                  regM[wSubRowIdx * TM + resIdxM] * regN[wSubColIdx * TN + resIdxN];
+              }
+            }
+          }
+        }
+      }
+      barrier();
+
+      // process current+1 (B1)
+
+      if (wkgroupIdx + BK < pc.K){
+        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
+          for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+            for (uint i = 0; i < TM; ++i) {
+              regM[wSubRowIdx * TM + i] = 
+                As[As_offset + dotIdx * BM + subgroupRow * WM + wSubRowIdx * WSUBM + threadRowInSubgroup * TM + i];
+            }
+          }        
+
+          for (uint wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
+            for (uint i = 0; i < TN; ++i) {
+              regN[wSubColIdx * TN + i] = 
+                Bs[Bs_offset + dotIdx * BN + subgroupCol * WN + wSubColIdx * WSUBN + threadColInSubgroup * TN + i];
+            }
+          }
+
+          for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+            for (uint wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
+              for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
+                for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
+                  threadResults[(wSubRowIdx * TM + resIdxM) * (WNITER * TN) + (wSubColIdx * TN) + resIdxN] += 
+                    regM[wSubRowIdx * TM + resIdxM] * regN[wSubColIdx * TN + resIdxN];
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    barrier();   
+  }
+    
+
+  // write out the results
+  for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+    for (uint wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
+      for (uint resIdxM = 0; resIdxM < TM; resIdxM += 1) {
+        for (uint resIdxN = 0; resIdxN < TN; resIdxN += 4) {
+          const uint row = wSubRowIdx * WSUBM + threadRowInSubgroup * TM + resIdxM;
+          const uint col = wSubColIdx * WSUBN + threadColInSubgroup * TN + resIdxN;
+          const uint cFloatIndex = c_base + row * pc.N + col;
+
+          vec4 tmp = c[cFloatIndex >> 2];
+
+          // perform GEMM update in reg
+          const uint i = (wSubRowIdx * TM + resIdxM) * (WNITER * TN) + wSubColIdx * TN + resIdxN;
+
+          tmp.x = pc.alpha * threadResults[i + 0] + pc.beta * tmp.x;
+          tmp.y = pc.alpha * threadResults[i + 1] + pc.beta * tmp.y;
+          tmp.z = pc.alpha * threadResults[i + 2] + pc.beta * tmp.z;
+          tmp.w = pc.alpha * threadResults[i + 3] + pc.beta * tmp.w;
+
+          // write back
+          c[cFloatIndex >> 2] = tmp;
+
+        }
+      }
+    }
+  }
+}

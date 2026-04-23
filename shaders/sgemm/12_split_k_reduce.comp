@@ -1,0 +1,41 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+  uint M;
+  uint N;
+  uint K;
+  float alpha;
+  float beta;
+  uint split_count;
+  uint total_tiles;
+}
+pc;
+
+layout(set = 0, binding = 0, std430) readonly buffer PartialC {
+  float partial[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer DummyB {
+  float dummy[];
+};
+
+layout(set = 0, binding = 2, std430) buffer MatrixC {
+  float c[];
+};
+
+void main() {
+  const uint c_index = gl_GlobalInvocationID.x;
+  const uint c_size = pc.M * pc.N;
+  if (c_index >= c_size) {
+    return;
+  }
+
+  float sum = 0.0;
+  for (uint split = 0; split < pc.split_count; ++split) {
+    sum += partial[split * c_size + c_index];
+  }
+
+  c[c_index] = pc.alpha * sum + pc.beta * c[c_index];
+}

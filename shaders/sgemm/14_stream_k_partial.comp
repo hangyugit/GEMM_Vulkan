@@ -1,0 +1,72 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+  uint M;
+  uint N;
+  uint K;
+  float alpha;
+  float beta;
+  uint split_count;
+  uint total_tiles;
+}
+pc;
+
+layout(set = 0, binding = 0, std430) readonly buffer MatrixA {
+  float a[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer MatrixB {
+  float b[];
+};
+
+layout(set = 0, binding = 2, std430) buffer PartialC {
+  float partial[];
+};
+
+layout(set = 0, binding = 3, std430) buffer WorkQueue {
+  uint next_work;
+};
+
+shared uint work_id;
+
+void main() {
+  const uint local_linear =
+      gl_LocalInvocationID.y * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
+  const uint tile_n_count = (pc.N + 15u) / 16u;
+  const uint total_work = pc.total_tiles * pc.split_count;
+
+  while (true) {
+    if (local_linear == 0u) {
+      work_id = atomicAdd(next_work, 1u);
+    }
+    barrier();
+
+    if (work_id >= total_work) {
+      break;
+    }
+
+    const uint tile_id = work_id / pc.split_count;
+    const uint split_id = work_id - tile_id * pc.split_count;
+    const uint tile_m = tile_id / tile_n_count;
+    const uint tile_n = tile_id - tile_m * tile_n_count;
+    const uint row = tile_m * 16u + gl_LocalInvocationID.y;
+    const uint col = tile_n * 16u + gl_LocalInvocationID.x;
+
+    if (row < pc.M && col < pc.N) {
+      const uint k_per_split = (pc.K + pc.split_count - 1u) / pc.split_count;
+      const uint k_begin = split_id * k_per_split;
+      const uint k_end = min(k_begin + k_per_split, pc.K);
+
+      float acc = 0.0;
+      for (uint kk = k_begin; kk < k_end; ++kk) {
+        acc += a[row * pc.K + kk] * b[kk * pc.N + col];
+      }
+
+      const uint c_index = row * pc.N + col;
+      partial[split_id * pc.M * pc.N + c_index] = acc;
+    }
+    barrier();
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "description": "Autotune space for Vulkan SGEMM 11_autotuned specialization constants.",
+  "autotuned_kernel_id": 13,
+  "benchmark": {
+    "m": 4096,
+    "n": 4096,
+    "k": 4096,
+    "alpha": 0.5,
+    "beta": 3.0,
+    "warmup": 1,
+    "iters": 5,
+    "verify": false
+  },
+  "limits": {
+    "max_shared_bytes": 98304,
+    "max_thread_results": 128,
+    "max_workgroup_invocations": 1024
+  },
+  "outputs": {
+    "raw": "results/benchmark/autotune_raw.json",
+    "best": "results/benchmark/autotune_best.json"
+  },
+  "search_space": {
+    "block_m": [64, 128, 256],
+    "block_n": [64, 128, 256],
+    "block_k": [8, 16, 32],
+    "warp_m": [64, 128],
+    "warp_n": [32, 64],
+    "warp_n_iter": [1, 2],
+    "thread_m": [4, 8],
+    "thread_n": [4, 8],
+    "local_size_x": [128, 256],
+    "stages": [2],
+    "dispatch_order": ["columns_then_rows"]
+  }
+}

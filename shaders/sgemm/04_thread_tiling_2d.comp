@@ -1,0 +1,118 @@
+#version 450
+
+// Planned stage: 2D thread tiling.
+// Intentionally not wired into the build yet.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+  uint M;
+  uint N;
+  uint K;
+  float alpha;
+  float beta;
+}
+pc;
+
+layout(set = 0, binding = 0, std430) readonly buffer MatrixA {
+  float a[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer MatrixB {
+  float b[];
+};
+
+layout(set = 0, binding = 2, std430) buffer MatrixC {
+  float c[];
+};
+
+shared float As[128 * 8];
+shared float Bs[8 * 128];
+
+void main(){
+    const uint BM = 128;
+    const uint BN = 128;
+    const uint BK = 8;
+    const uint TM = 8;
+    const uint TN = 8;
+
+    const uint cRow = gl_WorkGroupID.y;
+    const uint cCol = gl_WorkGroupID.x;
+
+    const uint totalResultsBlocktile = BM * BN;
+
+    const uint numThreadsBlocktile = totalResultsBlocktile / (TM * TN);
+
+    if (numThreadsBlocktile != gl_WorkGroupSize.x){
+        return;
+    }
+
+    const uint threadCol = gl_LocalInvocationID.x % (BN / TN);
+    const uint threadRow = gl_LocalInvocationID.x / (BN / TN);
+
+    const uint a_base = cRow * BM * pc.K;
+    const uint b_base = cCol * BN;
+    const uint c_base = cRow * BM * pc.N + cCol * BN;
+
+    const uint innerRowA = gl_LocalInvocationID.x / BK;
+    const uint innerColA = gl_LocalInvocationID.x % BK; 
+    
+
+    const uint strideA = numThreadsBlocktile / BK;
+    const uint innerRowB = gl_LocalInvocationID.x / BN;
+    const uint innerColB = gl_LocalInvocationID.x % BN;
+
+    const uint strideB = numThreadsBlocktile / BN;
+
+    float threadResults[TM * TN];
+
+    for (uint i = 0; i < TM * TN; ++i)
+    {
+        threadResults[i] = 0.0;
+    }
+
+    float regM[TM] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    float regN[TN] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    for (uint wkgroupIdx = 0; wkgroupIdx < pc.K; wkgroupIdx += BK) {
+
+        for (uint loadOffset = 0; loadOffset < BM; loadOffset += strideA){
+            As[(innerRowA + loadOffset) * BK + innerColA] = a[a_base + (innerRowA + loadOffset) * pc.K + wkgroupIdx + innerColA];
+        }
+
+        for (uint loadOffset = 0; loadOffset < BK; loadOffset += strideB){
+            Bs[(innerRowB + loadOffset) * BN + innerColB] = b[b_base + (wkgroupIdx + innerRowB + loadOffset) * pc.N + innerColB];
+        }
+
+        barrier();
+
+        // calculate per-thread results
+        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
+            // block into registers
+            for (uint i = 0; i < TM; ++i) {
+                regM[i] = As[(threadRow * TM + i) * BK + dotIdx];
+            }
+            for (uint i = 0; i < TN; ++i) {
+                regN[i] = Bs[dotIdx * BN + threadCol * TN + i];
+            }
+            for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
+                for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
+                threadResults[resIdxM * TN + resIdxN] += regM[resIdxM] * regN[resIdxN];
+                }
+            }
+        }
+        
+        barrier();
+
+    }
+
+    // write out the results
+    for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
+        for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
+        c[c_base + (threadRow * TM + resIdxM) * pc.N + threadCol * TN + resIdxN] =
+            pc.alpha * threadResults[resIdxM * TN + resIdxN] +
+            pc.beta * c[c_base + (threadRow * TM + resIdxM) * pc.N + threadCol * TN + resIdxN];
+        }
+    }
+
+}

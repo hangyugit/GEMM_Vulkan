@@ -1,0 +1,218 @@
+#version 450
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+#define BM 128u
+#define BN 128u
+#define BK 16u
+#define WM 64u
+#define WN 64u
+#define TM 8u
+#define TN 4u
+#define SUBGROUP_SIZE 32u
+#define NUM_THREADS 128u
+#define WSUBN 16u
+
+layout(push_constant) uniform PushConstants {
+  uint M;
+  uint N;
+  uint K;
+  float alpha;
+  float beta;
+}
+pc;
+
+layout(set = 0, binding = 0, std430) readonly buffer MatrixA {
+  vec4 a[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer MatrixB {
+  vec4 b[];
+};
+
+layout(set = 0, binding = 2, std430) buffer MatrixC {
+  vec4 c[];
+};
+
+shared float As[BM * BK];
+shared float Bs[BK * BN];
+
+#define ACCUM_ROW(ACC0, ACC1, ACC2, ACC3, AVAL) \
+  ACC0 += (AVAL) * b0;                          \
+  ACC1 += (AVAL) * b1;                          \
+  ACC2 += (AVAL) * b2;                          \
+  ACC3 += (AVAL) * b3
+
+#define STORE_ACC(ROW_OFFSET, COL_OFFSET, ACC)                              \
+  {                                                                         \
+    const uint c_float_index = c_subgroup_base +                            \
+                               (c_row_base + (ROW_OFFSET)) * pc.N +         \
+                               c_col_base + (COL_OFFSET);                   \
+    const uint c_vec_index = c_float_index >> 2;                            \
+    const vec4 old_c = c[c_vec_index];                                      \
+    c[c_vec_index] = pc.alpha * (ACC) + pc.beta * old_c;                    \
+  }
+
+void main() {
+  const uint c_row = gl_WorkGroupID.y;
+  const uint c_col = gl_WorkGroupID.x;
+  const uint local_id = gl_LocalInvocationID.x;
+
+  const uint subgroup_idx = local_id / SUBGROUP_SIZE;
+  const uint subgroup_col = subgroup_idx % (BN / WN);
+  const uint subgroup_row = subgroup_idx / (BN / WN);
+
+  const uint thread_idx_in_subgroup = local_id % SUBGROUP_SIZE;
+  const uint thread_col_in_subgroup = thread_idx_in_subgroup % (WSUBN / TN);
+  const uint thread_row_in_subgroup = thread_idx_in_subgroup / (WSUBN / TN);
+
+  const uint a_base = c_row * BM * pc.K;
+  const uint b_base = c_col * BN;
+
+  const uint inner_row_a = local_id / (BK / 4u);
+  const uint inner_col_a = local_id % (BK / 4u);
+  const uint row_stride_a = (NUM_THREADS * 4u) / BK;
+
+  const uint inner_row_b = local_id / (BN / 4u);
+  const uint inner_col_b = local_id % (BN / 4u);
+  const uint row_stride_b = NUM_THREADS / (BN / 4u);
+
+  vec4 acc00 = vec4(0.0);
+  vec4 acc01 = vec4(0.0);
+  vec4 acc02 = vec4(0.0);
+  vec4 acc03 = vec4(0.0);
+  vec4 acc10 = vec4(0.0);
+  vec4 acc11 = vec4(0.0);
+  vec4 acc12 = vec4(0.0);
+  vec4 acc13 = vec4(0.0);
+  vec4 acc20 = vec4(0.0);
+  vec4 acc21 = vec4(0.0);
+  vec4 acc22 = vec4(0.0);
+  vec4 acc23 = vec4(0.0);
+  vec4 acc30 = vec4(0.0);
+  vec4 acc31 = vec4(0.0);
+  vec4 acc32 = vec4(0.0);
+  vec4 acc33 = vec4(0.0);
+  vec4 acc40 = vec4(0.0);
+  vec4 acc41 = vec4(0.0);
+  vec4 acc42 = vec4(0.0);
+  vec4 acc43 = vec4(0.0);
+  vec4 acc50 = vec4(0.0);
+  vec4 acc51 = vec4(0.0);
+  vec4 acc52 = vec4(0.0);
+  vec4 acc53 = vec4(0.0);
+  vec4 acc60 = vec4(0.0);
+  vec4 acc61 = vec4(0.0);
+  vec4 acc62 = vec4(0.0);
+  vec4 acc63 = vec4(0.0);
+  vec4 acc70 = vec4(0.0);
+  vec4 acc71 = vec4(0.0);
+  vec4 acc72 = vec4(0.0);
+  vec4 acc73 = vec4(0.0);
+
+  for (uint wkgroup_idx = 0u; wkgroup_idx < pc.K; wkgroup_idx += BK) {
+    for (uint offset = 0u; offset + row_stride_a <= BM;
+         offset += row_stride_a) {
+      const uint row = inner_row_a + offset;
+      const uint a_float_index =
+          a_base + row * pc.K + wkgroup_idx + inner_col_a * 4u;
+      const vec4 a_vec = a[a_float_index >> 2];
+
+      As[(inner_col_a * 4u + 0u) * BM + row] = a_vec.x;
+      As[(inner_col_a * 4u + 1u) * BM + row] = a_vec.y;
+      As[(inner_col_a * 4u + 2u) * BM + row] = a_vec.z;
+      As[(inner_col_a * 4u + 3u) * BM + row] = a_vec.w;
+    }
+
+    for (uint offset = 0u; offset + row_stride_b <= BK;
+         offset += row_stride_b) {
+      const uint row = inner_row_b + offset;
+      const uint b_float_index =
+          (wkgroup_idx + row) * pc.N + b_base + inner_col_b * 4u;
+      const vec4 b_vec = b[b_float_index >> 2];
+
+      Bs[row * BN + inner_col_b * 4u + 0u] = b_vec.x;
+      Bs[row * BN + inner_col_b * 4u + 1u] = b_vec.y;
+      Bs[row * BN + inner_col_b * 4u + 2u] = b_vec.z;
+      Bs[row * BN + inner_col_b * 4u + 3u] = b_vec.w;
+    }
+
+    barrier();
+
+    const uint a_row_base = subgroup_row * WM + thread_row_in_subgroup * TM;
+    const uint b_col_base = subgroup_col * WN + thread_col_in_subgroup * TN;
+
+    for (uint dot_idx = 0u; dot_idx < BK; ++dot_idx) {
+      const uint a_smem_base = dot_idx * BM + a_row_base;
+      const float a0 = As[a_smem_base + 0u];
+      const float a1 = As[a_smem_base + 1u];
+      const float a2 = As[a_smem_base + 2u];
+      const float a3 = As[a_smem_base + 3u];
+      const float a4 = As[a_smem_base + 4u];
+      const float a5 = As[a_smem_base + 5u];
+      const float a6 = As[a_smem_base + 6u];
+      const float a7 = As[a_smem_base + 7u];
+
+      const uint b_smem_base = dot_idx * BN + b_col_base;
+      const vec4 b0 = vec4(Bs[b_smem_base + 0u], Bs[b_smem_base + 1u],
+                           Bs[b_smem_base + 2u], Bs[b_smem_base + 3u]);
+      const vec4 b1 = vec4(Bs[b_smem_base + 16u], Bs[b_smem_base + 17u],
+                           Bs[b_smem_base + 18u], Bs[b_smem_base + 19u]);
+      const vec4 b2 = vec4(Bs[b_smem_base + 32u], Bs[b_smem_base + 33u],
+                           Bs[b_smem_base + 34u], Bs[b_smem_base + 35u]);
+      const vec4 b3 = vec4(Bs[b_smem_base + 48u], Bs[b_smem_base + 49u],
+                           Bs[b_smem_base + 50u], Bs[b_smem_base + 51u]);
+
+      ACCUM_ROW(acc00, acc01, acc02, acc03, a0);
+      ACCUM_ROW(acc10, acc11, acc12, acc13, a1);
+      ACCUM_ROW(acc20, acc21, acc22, acc23, a2);
+      ACCUM_ROW(acc30, acc31, acc32, acc33, a3);
+      ACCUM_ROW(acc40, acc41, acc42, acc43, a4);
+      ACCUM_ROW(acc50, acc51, acc52, acc53, a5);
+      ACCUM_ROW(acc60, acc61, acc62, acc63, a6);
+      ACCUM_ROW(acc70, acc71, acc72, acc73, a7);
+    }
+
+    barrier();
+  }
+
+  const uint c_block_base = c_row * BM * pc.N + c_col * BN;
+  const uint c_subgroup_base =
+      c_block_base + subgroup_row * WM * pc.N + subgroup_col * WN;
+  const uint c_row_base = thread_row_in_subgroup * TM;
+  const uint c_col_base = thread_col_in_subgroup * TN;
+
+  STORE_ACC(0u, 0u, acc00);
+  STORE_ACC(0u, 16u, acc01);
+  STORE_ACC(0u, 32u, acc02);
+  STORE_ACC(0u, 48u, acc03);
+  STORE_ACC(1u, 0u, acc10);
+  STORE_ACC(1u, 16u, acc11);
+  STORE_ACC(1u, 32u, acc12);
+  STORE_ACC(1u, 48u, acc13);
+  STORE_ACC(2u, 0u, acc20);
+  STORE_ACC(2u, 16u, acc21);
+  STORE_ACC(2u, 32u, acc22);
+  STORE_ACC(2u, 48u, acc23);
+  STORE_ACC(3u, 0u, acc30);
+  STORE_ACC(3u, 16u, acc31);
+  STORE_ACC(3u, 32u, acc32);
+  STORE_ACC(3u, 48u, acc33);
+  STORE_ACC(4u, 0u, acc40);
+  STORE_ACC(4u, 16u, acc41);
+  STORE_ACC(4u, 32u, acc42);
+  STORE_ACC(4u, 48u, acc43);
+  STORE_ACC(5u, 0u, acc50);
+  STORE_ACC(5u, 16u, acc51);
+  STORE_ACC(5u, 32u, acc52);
+  STORE_ACC(5u, 48u, acc53);
+  STORE_ACC(6u, 0u, acc60);
+  STORE_ACC(6u, 16u, acc61);
+  STORE_ACC(6u, 32u, acc62);
+  STORE_ACC(6u, 48u, acc63);
+  STORE_ACC(7u, 0u, acc70);
+  STORE_ACC(7u, 16u, acc71);
+  STORE_ACC(7u, 32u, acc72);
+  STORE_ACC(7u, 48u, acc73);
+}
+

@@ -1,0 +1,51 @@
+#version 450
+
+layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+  uint M;
+  uint N;
+  uint K;
+  float alpha;
+  float beta;
+}
+pc;
+
+layout(set = 0, binding = 0, std430) readonly buffer MatrixA {
+  float a[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer MatrixB {
+  float b[];
+};
+
+layout(set = 0, binding = 2, std430) buffer MatrixC {
+  float c[];
+};
+
+void main() {
+  // CUDA Version
+  // const uint x = blockIdx.x * blockDim.x + threadIdx.x;
+  // const uint y = blockIdx.y * blockDim.y + threadIdx.y;
+
+  // Vulkan Version
+  const uvec2 coord = gl_GlobalInvocationID.xy;
+  const uint x = coord.x;
+  const uint y = coord.y;
+
+  if (x >= pc.M || y >= pc.N) {
+    return;
+  }
+
+  float acc = 0.0;
+  for (uint i = 0; i < pc.K; ++i) {
+    //const float lhs = a[x * pc.K + i];
+    //const float rhs = b[i * pc.N + y];
+    //acc = fma(lhs, rhs, acc);  // fma(a, b, c) = a * b + c
+
+    acc += a[x * pc.K + i] * b[i * pc.N + y];
+  }
+
+  // C = α*(A@B)+β*C
+  c[x * pc.N + y] = pc.alpha * acc + pc.beta * c[x * pc.N + y];
+}

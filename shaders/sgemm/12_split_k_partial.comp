@@ -1,0 +1,47 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+  uint M;
+  uint N;
+  uint K;
+  float alpha;
+  float beta;
+  uint split_count;
+  uint total_tiles;
+}
+pc;
+
+layout(set = 0, binding = 0, std430) readonly buffer MatrixA {
+  float a[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer MatrixB {
+  float b[];
+};
+
+layout(set = 0, binding = 2, std430) buffer PartialC {
+  float partial[];
+};
+
+void main() {
+  const uint col = gl_GlobalInvocationID.x;
+  const uint row = gl_GlobalInvocationID.y;
+  const uint split_id = gl_GlobalInvocationID.z;
+  if (row >= pc.M || col >= pc.N || split_id >= pc.split_count) {
+    return;
+  }
+
+  const uint k_per_split = (pc.K + pc.split_count - 1u) / pc.split_count;
+  const uint k_begin = split_id * k_per_split;
+  const uint k_end = min(k_begin + k_per_split, pc.K);
+
+  float acc = 0.0;
+  for (uint kk = k_begin; kk < k_end; ++kk) {
+    acc += a[row * pc.K + kk] * b[kk * pc.N + col];
+  }
+
+  const uint c_index = row * pc.N + col;
+  partial[split_id * pc.M * pc.N + c_index] = acc;
+}

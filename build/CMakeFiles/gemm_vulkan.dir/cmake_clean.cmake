@@ -1,0 +1,41 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/gemm_vulkan.dir/src/app/main.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/app/main.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/benchmark.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/benchmark.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/configs/autotune_space.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/configs/autotune_space.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/configs/default_configs.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/configs/default_configs.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/kernels/launch_config.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/kernels/launch_config.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/kernels/registry.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/kernels/registry.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/reference_cpu.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/reference_cpu.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/runner.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/runner.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/verifier.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/gemm/verifier.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/buffer.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/buffer.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/command.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/command.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/descriptor.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/descriptor.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/device.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/device.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/instance.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/instance.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/pipeline.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/pipeline.cpp.o.d"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/timestamp.cpp.o"
+  "CMakeFiles/gemm_vulkan.dir/src/runtime/timestamp.cpp.o.d"
+  "gemm_vulkan"
+  "gemm_vulkan.pdb"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/gemm_vulkan.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()

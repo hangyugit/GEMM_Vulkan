@@ -1,0 +1,87 @@
+#version 450
+
+layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+  uint M;
+  uint N;
+  uint K;
+  float alpha;
+  float beta;
+}
+pc;
+
+layout(set = 0, binding = 0, std430) readonly buffer MatrixA {
+  vec4 a4[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer MatrixB {
+  float b[];
+};
+
+layout(set = 0, binding = 2, std430) buffer MatrixC {
+  float c[];
+};
+
+shared vec4 As4[64 * 2];
+shared vec4 Bs4[64 * 2];
+
+void main() {
+  const uint BM = 64;
+  const uint BN = 64;
+  const uint BK = 8;
+  const uint TM = 8;
+  const uint KV = BK / 4;
+
+  const uint cRow = gl_WorkGroupID.y;
+  const uint cCol = gl_WorkGroupID.x;
+
+  const uint localId = gl_LocalInvocationID.x;
+  const uint threadCol = localId % BN;
+  const uint threadRow = localId / BN;
+
+  const uint aBase = cRow * BM * pc.K;
+  const uint bBase = cCol * BN;
+  const uint cBase = cRow * BM * pc.N + cCol * BN;
+
+  float threadResults[8] =
+      {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+  for (uint kTile = 0; kTile < pc.K; kTile += BK) {
+    if (localId < BM * KV) {
+      const uint row = localId / KV;
+      const uint kVec = localId % KV;
+      const uint aFloatIndex = aBase + row * pc.K + kTile + kVec * 4;
+      As4[row * KV + kVec] = a4[aFloatIndex >> 2];
+    }
+
+    if (localId < BN * KV) {
+      const uint col = localId % BN;
+      const uint kVec = localId / BN;
+      const uint kBase = kTile + kVec * 4;
+      Bs4[col * KV + kVec] =
+          vec4(b[(kBase + 0) * pc.N + bBase + col],
+               b[(kBase + 1) * pc.N + bBase + col],
+               b[(kBase + 2) * pc.N + bBase + col],
+               b[(kBase + 3) * pc.N + bBase + col]);
+    }
+
+    barrier();
+
+    for (uint dotVec = 0; dotVec < KV; ++dotVec) {
+      const vec4 rhs = Bs4[threadCol * KV + dotVec];
+      for (uint resIdx = 0; resIdx < TM; ++resIdx) {
+        const uint row = threadRow * TM + resIdx;
+        const vec4 lhs = As4[row * KV + dotVec];
+        threadResults[resIdx] += dot(lhs, rhs);
+      }
+    }
+
+    barrier();
+  }
+
+  for (uint resIdx = 0; resIdx < TM; ++resIdx) {
+    const uint cIndex = cBase + (threadRow * TM + resIdx) * pc.N + threadCol;
+    c[cIndex] = pc.alpha * threadResults[resIdx] + pc.beta * c[cIndex];
+  }
+}
