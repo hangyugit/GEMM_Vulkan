@@ -1,2 +1,0 @@
-kernel_id,kernel_name,m,n,k,alpha,beta,warmup_iters,timed_iters,kernel_avg_ms,kernel_min_ms,kernel_max_ms,kernel_stddev_ms,wall_avg_ms,wall_min_ms,wall_max_ms,wall_stddev_ms,gflops,bytes_moved,verify_passed,max_abs_error,max_rel_error,workgroup_x,workgroup_y,workgroup_z,block_m,block_n,block_k,thread_m,thread_n,vector_width,use_shared,use_subgroup
-0,"00_naive",64,64,64,1,0,1,4,0.008208,0.007776,0.00864,0.000349445,0.0281305,0.023695,0.038823,0.00620791,63.8752,65536,1,1.43051e-06,2.98959e-07,16,16,1,16,16,1,1,1,1,0,0
