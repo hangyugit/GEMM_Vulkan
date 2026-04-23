@@ -31,6 +31,10 @@ Main kernels with a direct CUDA counterpart:
 | `subgroup(warp) tiling` | `843.9` | `3.0%` | `2.6%` |
 | `double buffering` | `26690.7` | `105.7%` | `81.7%` |
 
+The CUDA baseline used for these comparisons comes from
+[`siboehm/SGEMM_CUDA`](https://github.com/siboehm/SGEMM_CUDA), specifically the
+kernel ladder presented in that repository's SGEMM walkthrough.
+
 That makes this repo less about "port the CUDA code verbatim" and more about
 understanding which CUDA ideas transfer directly, and which ones need to be
 reshaped so that GLSL, SPIR-V, and the Vulkan shader compiler can still realize
@@ -123,6 +127,14 @@ from-scratch kernels.
 | `split-k` | `3039.6` |
 | `scheduler` | `2264.2` |
 | `stream-k` | `2247.6` |
+
+## References
+
+- CUDA comparison baseline:
+  [`siboehm/SGEMM_CUDA`](https://github.com/siboehm/SGEMM_CUDA)
+- Other blog posts worth reading:
+  [`Learn CUTLASS the hard way!`](https://www.kapilsharma.dev/posts/learn-cutlass-the-hard-way/),
+  [`Learn CUTLASS the hard way - part 2!`](https://www.kapilsharma.dev/posts/learn-cutlass-the-hard-way-2/)
 
 ## Build
 
