@@ -167,15 +167,14 @@ List kernels:
 Run a single kernel:
 
 ```bash
-./build/gemm_vulkan --kernel 11 --m 4096 --n 4096 --k 4096 --iters 10
+./build/gemm_vulkan --kernel 11 --m 4096 --n 4096 --k 4096 \
+  --warmup 1 --iters 50 --no-verify
 ```
 
-Write benchmark CSV output:
-
-```bash
-./build/gemm_vulkan --kernel 11 --m 4096 --n 4096 --k 4096 --iters 10 \
-  --output results/benchmark/double_buffering.csv
-```
+`--no-verify` is used here because verification is done against a CPU SGEMM
+reference, and for a large `4096 x 4096 x 4096` problem that check takes much
+longer than the GPU kernel timing you usually want to inspect during
+benchmarking.
 
 ## Kernel Ladder
 
