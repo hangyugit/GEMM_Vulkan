@@ -53,19 +53,22 @@ memory behavior that made the CUDA version fast.
 | `1d tiling (lds)` | `11533.9` | `99.9%` |
 
 The initial Vulkan kernel, [`03_thread_tiling_1d.comp`](shaders/sgemm/03_thread_tiling_1d.comp),
-uses a very wide `workgroup_x=512` layout with `thread_n=1`. Each invocation
-accumulates eight rows of `C`, so reuse happens mostly along `M`, while the
-`N` direction is still streamed almost scalar-style. That means the kernel does
-more work per thread, but it does not improve horizontal reuse enough to pay
-for the extra LDS/shared-memory traffic.
+already had the same broad tiling idea as the CUDA kernel, but the shared-memory
+load path was not equivalent. On the CUDA side, `nvcc` emits `LDS128`-style
+loads from shared memory for this stage. On the Vulkan side, `glslc` compiled
+the shared-memory path into scalar `float` loads, so the shader spent many more
+instructions pulling the same data out of LDS/shared memory.
 
-The recovery came from changing the shape of the shared-memory path rather than
-changing the tiling idea itself. The follow-up kernel,
+That is why the first Vulkan `1d tiling` result lands at only `64.3%` of the
+CUDA kernel even though the overall tiling structure looks similar.
+
+The recovery came from making the load path explicit. The follow-up kernel,
 [`03_thread_tiling_1d_shared_vec.comp`](shaders/sgemm/03_thread_tiling_1d_shared_vec.comp),
-stages the tile through `vec4` LDS/shared-memory loads (`As4` and `Bs4`) and
-computes each K-step with `dot(lhs, rhs)`. In the graph that shows up as the
-`1d tiling(LDS128)` bar: same basic 1D tiling strategy, but with 128-bit
-shared-memory transactions that remove most of the gap to CUDA.
+stages and consumes the tile through `vec4` values (`As4` and `Bs4`) so the
+shared-memory traffic matches the `LDS128`-style behavior much more closely.
+In the graph that shows up as the `1d tiling(LDS128)` bar: same 1D tiling
+strategy, but with vectorized shared-memory loads, which brings Vulkan back to
+`99.9%` of the CUDA kernel.
 
 ## Why Subgroup Tiling Collapsed At First
 
@@ -86,8 +89,10 @@ warp tile to a Vulkan subgroup tile and keeps the expected `128x128x16` block,
 `64x64` subgroup tile, and register-resident accumulators. On paper that is the
 right step. In practice, the original shader used deeply nested loops, generic
 accumulator arrays, and dynamic indexing on both shared-memory loads and result
-updates. The result was extremely poor realized throughput even though the
-tiling hierarchy itself was sound.
+updates. That dynamic indexing made it much harder for the compiler to keep the
+subgroup fragments and accumulators in registers and issue the intended
+register-resident math path cleanly. The result was extremely poor realized
+throughput even though the tiling hierarchy itself was sound.
 
 Two changes fixed it:
 
@@ -95,9 +100,10 @@ Two changes fixed it:
    specifically for `08_subgroup_tiling.comp`.
 2. Add a compiler-friendly variant,
    [`08_subgroup_tiling_compiler_friendly.comp`](shaders/sgemm/08_subgroup_tiling_compiler_friendly.comp),
-   which scalarizes and unrolls the accumulator path (`acc00` ... `acc73`) and
-   simplifies the address arithmetic enough for the compiler to generate the
-   code you actually wanted.
+   which scalarizes and unrolls the accumulator path (`acc00` ... `acc73`),
+   removes the problematic dynamic indexing, and simplifies the address
+   arithmetic enough for the compiler to keep the hot data path in registers and
+   generate the code you actually wanted.
 
 So the takeaway from this graph is not that subgroup tiling is a bad fit for
 Vulkan. It is that subgroup tiling is much more sensitive to code shape and
